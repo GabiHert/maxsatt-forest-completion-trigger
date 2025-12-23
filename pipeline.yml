@@ -1,0 +1,34 @@
+# Runtime Config
+language: golang                        # Programming language used
+language_version: 1.25.1                # Version of the language
+
+# Aws Config
+region_dev: us-west-2                   # AWS region for the dev environment
+region_prd: us-west-2                   # AWS region for the production environment
+account_id_dev: 125896622074            # AWS Account ID for dev
+account_id_prd:                         # AWS Account ID for prod
+
+# Build and Deployment Options
+deploy_dev: true                        # Should perform the actual deployment on dev?
+deploy_prd: false                       # Should perform the actual deployment on prd?
+deploy_type: lambda                     # Type of deployment (lambda, ecs, etc.)
+s3_bucket_dev: none                     # S3 bucket dev
+s3_bucket_prd: none                     # S3 bucket prd
+path_to_deploy:                         # Path for deployment to s3
+
+# Testing Options
+mutation_test: true                     # Run mutation tests?
+validate_mutation_coverage: true        # Should enforce minimum mutation coverage?
+min_mutation_coverage: 89.00            # Minimum accepted mutation coverage (%)
+validate_mutation_test_efficacy: true   # Should validate the effectiveness of tests?
+min_mutation_test_efficacy: 100         # Minimum test efficacy (%)
+
+unit_test: true                         # Run unit tests?
+validate_test_coverage: true            # Enforce minimum test coverage?
+min_test_coverage: 85.00                # Minimum test coverage (%)
+
+dependency_check: true                  # Run dependency checks
+
+# Notifications
+discord_notify: true                    # Send pipeline status notifications to Discord?
+

@@ -1,0 +1,20 @@
+name: Prd Pipeline
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  call-shared-pipeline:
+    uses: bhlabz/cicd-pipeline/.github/workflows/shared-pipeline.yml@main
+    permissions:
+      id-token: write
+      contents: write
+    with:
+      environment: prd
+      architecture: 'arm64'

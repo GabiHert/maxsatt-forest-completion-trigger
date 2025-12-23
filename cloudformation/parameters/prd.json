@@ -1,0 +1,30 @@
+[
+  {
+    "ParameterKey": "Env",
+    "ParameterValue": "prd"
+  },
+  {
+    "ParameterKey": "APISecretArn",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "AuthURL",
+    "ParameterValue": "https://maxsatt.bhlabs.tech/auth/v1"
+  },
+  {
+    "ParameterKey": "ForestFieldAPIURL",
+    "ParameterValue": "https://maxsatt.bhlabs.tech/maxsatt"
+  },
+  {
+    "ParameterKey": "WeatherAPIURL",
+    "ParameterValue": "https://archive-api.open-meteo.com"
+  },
+  {
+    "ParameterKey": "S3BucketName",
+    "ParameterValue": "maxsatt-processing-prd"
+  },
+  {
+    "ParameterKey": "DiscordWebhookURL",
+    "ParameterValue": ""
+  }
+]

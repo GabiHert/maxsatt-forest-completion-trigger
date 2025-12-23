@@ -1,0 +1,17 @@
+coverage.out
+coverage.html
+mutation_results.log
+nancy-report.log
+.vscode
+report.json
+coverage.lcov
+coverage.xml
+.idea
+node_modules
+dockpay-transaction-api
+/tools
+package.json
+package-lock.json
+.husky
+**/tmp/*
+**/.DS_Store

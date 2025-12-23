@@ -1,0 +1,30 @@
+[
+  {
+    "ParameterKey": "Env",
+    "ParameterValue": "dev"
+  },
+  {
+    "ParameterKey": "APISecretArn",
+    "ParameterValue": "arn:aws:secretsmanager:us-west-2:125896622074:secret:maxsatt-forest-image-fetcher-secret-iviAZC"
+  },
+  {
+    "ParameterKey": "AuthURL",
+    "ParameterValue": "https://dev.maxsatt.bhlabs.tech/auth/v1"
+  },
+  {
+    "ParameterKey": "ForestFieldAPIURL",
+    "ParameterValue": "https://dev.maxsatt.bhlabs.tech/maxsatt"
+  },
+  {
+    "ParameterKey": "WeatherAPIURL",
+    "ParameterValue": "https://archive-api.open-meteo.com"
+  },
+  {
+    "ParameterKey": "S3BucketName",
+    "ParameterValue": "maxsatt-processing-dev"
+  },
+  {
+    "ParameterKey": "DiscordWebhookURL",
+    "ParameterValue": "https://discord.com/api/webhooks/1367851504257732698/sX971M_4k_YWWrEoPfd5xQXE111K-AHWVHkE3DGC-2DNtIcHrh5QXQQkiJU9h8ZSTjQR"
+  }
+]

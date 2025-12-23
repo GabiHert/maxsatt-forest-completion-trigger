@@ -1,0 +1,31 @@
+name: Rollback Pipeline
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to rollback'
+        required: true
+        type: string
+        options:
+          - dev
+          - prd
+      version_tag:
+        description: 'Git tag to rollback to (vX.X)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  call-shared-pipeline:
+    uses: bhlabz/cicd-pipeline/.github/workflows/rollback-pipeline.yml@main
+    permissions:
+      id-token: write
+      contents: write
+    with:
+      environment: ${{ inputs.environment }}
+      version_tag: ${{ inputs.version_tag }}
+      architecture: 'arm64'

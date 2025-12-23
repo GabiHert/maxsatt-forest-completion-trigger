@@ -1,0 +1,447 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: MaxSatt Image Climate Dataset Trigger - Processes image climate dataset requests and triggers analysis pipeline
+
+Parameters:
+  # ==================================================================================================
+  #   Stack Config
+  # ==================================================================================================
+  Version:
+    Type: String
+    Description: Application version for tagging
+
+  # ==================================================================================================
+  #   Tags Config
+  # ==================================================================================================
+  Env:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - hml
+      - prd
+    Description: Environment name
+
+  Service:
+    Type: String
+    Default: maxsatt-image-climate-dataset-trigger
+    Description: Service name
+
+  Application:
+    Type: String
+    Default: maxsatt-image-climate-dataset-trigger
+    Description: Application name
+
+  # ==================================================================================================
+  #   Log Group Config
+  # ==================================================================================================
+  LogsRetentionDays:
+    Type: Number
+    AllowedValues:
+      - 90
+      - 180
+      - 1827
+    Default: 90
+    Description: CloudWatch Logs retention period in days
+
+  # ==================================================================================================
+  #   SQS Config
+  # ==================================================================================================
+  DelaySeconds:
+    Type: Number
+    Default: 0
+    Description: Time in seconds that delivery of all messages in the queue is delayed
+
+  MessageRetentionPeriod:
+    Type: Number
+    Default: 1209600
+    Description: Number of seconds Amazon SQS retains a message (14 days)
+
+  ReceiveMessageWaitTimeSeconds:
+    Type: Number
+    Default: 0
+    Description: Time for which a ReceiveMessage call waits for a message to arrive
+
+  VisibilityTimeout:
+    Type: Number
+    Default: 300
+    Description: Visibility timeout for the queue (should be >= Lambda timeout)
+
+  ImageClimateDatasetTriggerQueueDLQName:
+    Type: String
+    Default: maxsatt-image-climate-dataset-trigger-queue-dlq
+    Description: Name of the DLQ for image climate dataset trigger messages
+
+  ImageClimateDatasetTriggerQueueName:
+    Type: String
+    Default: maxsatt-image-climate-dataset-trigger-queue
+    Description: Name of the main queue for image climate dataset trigger messages
+
+  ForestSchedulerQueueName:
+    Type: String
+    Default: maxsatt-forest-scheduler-queue
+    Description: Name of the main queue for forest schedule messages
+
+  MaxReceiveCount:
+    Type: Number
+    Default: 3
+    Description: Maximum number of receives before message goes to DLQ
+
+  # ==================================================================================================
+  #   SNS Config
+  # ==================================================================================================
+  ForestEventsTopicName:
+    Type: String
+    Default: forest-events-topic
+    Description: Name of the SNS topic for forest events (sends FOREST_ANALYSIS events)
+
+  # ==================================================================================================
+  #   Lambda Config
+  # ==================================================================================================
+  ImageUri:
+    Type: String
+    Description: ECR image URI for the Lambda function
+
+  FunctionName:
+    Type: String
+    Default: maxsatt-image-climate-dataset-trigger
+    Description: Lambda function name
+
+  MemorySize:
+    Type: Number
+    Default: 128
+    MinValue: 128
+    MaxValue: 10240
+    Description: Lambda function memory size in MB
+
+  Timeout:
+    Type: Number
+    Default: 300
+    MinValue: 1
+    MaxValue: 900
+    Description: Lambda function timeout in seconds
+
+  # ==================================================================================================
+  #   Lambda Environment Config
+  # ==================================================================================================
+  LogLevel:
+    Type: String
+    Default: INFO
+    AllowedValues:
+      - DEBUG
+      - INFO
+      - WARN
+      - ERROR
+    Description: Application log level
+
+  ForestScheduleIntervalDays:
+    Type: Number
+    Default: 5
+    Description: Interval in days for forest schedule analysis
+
+  APISecretArn:
+    Type: String
+    Description: ARN of the AWS Secrets Manager secret containing API credentials (JSON with AUTH_CLIENT_ID and AUTH_CLIENT_SECRET)
+
+  AuthURL:
+    Type: String
+    Description: OAuth2 authentication URL for API credentials
+
+  AuthGtwId:
+    Type: String
+    Default: ""
+    Description: API Gateway ID for authentication (optional)
+
+  ForestFieldAPIURL:
+    Type: String
+    Description: Base URL for Forest Field API (MaxSatt API)
+
+  WeatherAPIURL:
+    Type: String
+    Description: Base URL for Weather API (Open-Meteo)
+
+  # ==================================================================================================
+  #   S3 Config
+  # ==================================================================================================
+  S3BucketName:
+    Type: String
+    Description: S3 bucket name for climate data processing
+
+  # ==================================================================================================
+  #   Notifications Config
+  # ==================================================================================================
+  DiscordWebhookURL:
+    Type: String
+    Default: ""
+    Description: Discord webhook URL for error notifications (optional - leave empty to disable)
+
+Resources:
+  # ==================================================================================================
+  #   IAM Roles
+  # ==================================================================================================
+  ImageClimateDatasetTriggerLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${Service}-${Env}-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: "/"
+      Tags:
+        - Key: env
+          Value: !Ref Env
+        - Key: service
+          Value: !Ref Service
+        - Key: stack
+          Value: !Sub ${AWS::StackName}
+        - Key: application
+          Value: !Ref Application
+        - Key: resource
+          Value: iam_role
+
+  # ==================================================================================================
+  #   IAM Policies
+  # ==================================================================================================
+  ImageClimateDatasetTriggerLambdaLogsPolicy:
+    Type: AWS::IAM::Policy
+    DependsOn:
+      - ImageClimateDatasetTriggerLambdaRole
+      - ImageClimateDatasetTriggerLambdaLogGroup
+    Properties:
+      PolicyName: !Sub ${Service}-${Env}-logs-policy
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+            Resource: !GetAtt ImageClimateDatasetTriggerLambdaLogGroup.Arn
+      Roles:
+        - !Ref ImageClimateDatasetTriggerLambdaRole
+
+  ImageClimateDatasetTriggerReceiveSqsMessagePolicy:
+    Type: AWS::IAM::Policy
+    DependsOn:
+      - ImageClimateDatasetTriggerLambdaRole
+      - ImageClimateDatasetTriggerQueue
+    Properties:
+      PolicyName: !Sub ${Service}-${Env}-receive-sqs-policy
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - sqs:ReceiveMessage
+              - sqs:DeleteMessage
+              - sqs:GetQueueAttributes
+            Resource:
+              - !GetAtt ImageClimateDatasetTriggerQueue.Arn
+      Roles:
+        - !Ref ImageClimateDatasetTriggerLambdaRole
+
+  ImageClimateDatasetTriggerSendSqsMessagePolicy:
+    Type: AWS::IAM::Policy
+    DependsOn:
+      - ImageClimateDatasetTriggerLambdaRole
+    Properties:
+      PolicyName: !Sub ${Service}-${Env}-send-sqs-policy
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - sqs:SendMessage
+              - sqs:GetQueueUrl
+              - sqs:GetQueueAttributes
+            Resource:
+              - !Sub arn:aws:sqs:${AWS::Region}:${AWS::AccountId}:${ForestSchedulerQueueName}
+      Roles:
+        - !Ref ImageClimateDatasetTriggerLambdaRole
+
+  ImageClimateDatasetTriggerPublishSnsPolicy:
+    Type: AWS::IAM::Policy
+    DependsOn:
+      - ImageClimateDatasetTriggerLambdaRole
+    Properties:
+      PolicyName: !Sub ${Service}-${Env}-publish-sns-policy
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - sns:Publish
+            Resource:
+              - !Sub arn:aws:sns:${AWS::Region}:${AWS::AccountId}:${ForestEventsTopicName}
+      Roles:
+        - !Ref ImageClimateDatasetTriggerLambdaRole
+
+  ImageClimateDatasetTriggerSecretsManagerPolicy:
+    Type: AWS::IAM::Policy
+    DependsOn:
+      - ImageClimateDatasetTriggerLambdaRole
+    Properties:
+      PolicyName: !Sub ${Service}-${Env}-secrets-manager-policy
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - secretsmanager:GetSecretValue
+            Resource:
+              - !Ref APISecretArn
+      Roles:
+        - !Ref ImageClimateDatasetTriggerLambdaRole
+
+  ImageClimateDatasetTriggerS3Policy:
+    Type: AWS::IAM::Policy
+    DependsOn:
+      - ImageClimateDatasetTriggerLambdaRole
+    Properties:
+      PolicyName: !Sub ${Service}-${Env}-s3-policy
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+            Resource:
+              - !Sub "arn:aws:s3:::${S3BucketName}/*"
+          - Effect: Allow
+            Action:
+              - s3:ListBucket
+            Resource:
+              - !Sub "arn:aws:s3:::${S3BucketName}"
+      Roles:
+        - !Ref ImageClimateDatasetTriggerLambdaRole
+
+  # ==================================================================================================
+  #   CloudWatch Log Groups
+  # ==================================================================================================
+  ImageClimateDatasetTriggerLambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${FunctionName}
+      RetentionInDays: !Ref LogsRetentionDays
+      Tags:
+        - Key: env
+          Value: !Ref Env
+        - Key: service
+          Value: !Ref Service
+        - Key: stack
+          Value: !Sub ${AWS::StackName}
+        - Key: application
+          Value: !Ref Application
+        - Key: resource
+          Value: log_group
+
+  # ==================================================================================================
+  #   SQS Queues - Input Queue (standalone queue for image climate dataset triggers)
+  # ==================================================================================================
+  ImageClimateDatasetTriggerQueueDlq:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Ref ImageClimateDatasetTriggerQueueDLQName
+      MessageRetentionPeriod: !Ref MessageRetentionPeriod
+      Tags:
+        - Key: env
+          Value: !Ref Env
+        - Key: service
+          Value: !Ref Service
+        - Key: stack
+          Value: !Sub ${AWS::StackName}
+        - Key: application
+          Value: !Ref Application
+        - Key: resource
+          Value: sqs_dlq
+
+  ImageClimateDatasetTriggerQueue:
+    Type: AWS::SQS::Queue
+    DependsOn:
+      - ImageClimateDatasetTriggerQueueDlq
+    Properties:
+      QueueName: !Ref ImageClimateDatasetTriggerQueueName
+      DelaySeconds: !Ref DelaySeconds
+      MessageRetentionPeriod: !Ref MessageRetentionPeriod
+      ReceiveMessageWaitTimeSeconds: !Ref ReceiveMessageWaitTimeSeconds
+      VisibilityTimeout: !Ref VisibilityTimeout
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt ImageClimateDatasetTriggerQueueDlq.Arn
+        maxReceiveCount: !Ref MaxReceiveCount
+      Tags:
+        - Key: env
+          Value: !Ref Env
+        - Key: service
+          Value: !Ref Service
+        - Key: stack
+          Value: !Sub ${AWS::StackName}
+        - Key: application
+          Value: !Ref Application
+        - Key: resource
+          Value: sqs_queue
+
+  # ==================================================================================================
+  #   Lambda Function
+  # ==================================================================================================
+  ImageClimateDatasetTriggerLambda:
+    Type: AWS::Serverless::Function
+    DependsOn:
+      - ImageClimateDatasetTriggerLambdaLogGroup
+      - ImageClimateDatasetTriggerLambdaRole
+      - ImageClimateDatasetTriggerLambdaLogsPolicy
+      - ImageClimateDatasetTriggerReceiveSqsMessagePolicy
+      - ImageClimateDatasetTriggerSendSqsMessagePolicy
+      - ImageClimateDatasetTriggerPublishSnsPolicy
+      - ImageClimateDatasetTriggerSecretsManagerPolicy
+      - ImageClimateDatasetTriggerS3Policy
+      - ImageClimateDatasetTriggerQueue
+    Properties:
+      FunctionName: !Ref FunctionName
+      MemorySize: !Ref MemorySize
+      Timeout: !Ref Timeout
+      Role: !GetAtt ImageClimateDatasetTriggerLambdaRole.Arn
+      PackageType: Image
+      ImageUri: !Ref ImageUri
+      Architectures:
+        - arm64
+      Environment:
+        Variables:
+          ENV: !Ref Env
+          SERVICE_NAME: !Ref Service
+          LOG_LEVEL: !Ref LogLevel
+          AWS_SNS_REGION: !Sub ${AWS::Region}
+          AWS_SQS_REGION: !Sub ${AWS::Region}
+          AWS_SECRETS_MANAGER_REGION: !Sub ${AWS::Region}
+          FOREST_EVENTS_TOPIC_ARN: !Sub arn:aws:sns:${AWS::Region}:${AWS::AccountId}:${ForestEventsTopicName}
+          FOREST_SCHEDULE_QUEUE_URL: !Sub https://sqs.${AWS::Region}.amazonaws.com/${AWS::AccountId}/${ForestSchedulerQueueName}
+          FOREST_SCHEDULE_INTERVAL_DAYS: !Ref ForestScheduleIntervalDays
+          API_SECRET: !Ref APISecretArn
+          AUTH_URL: !Ref AuthURL
+          AUTH_GTW_ID: !Ref AuthGtwId
+          FOREST_FIELD_API_URL: !Ref ForestFieldAPIURL
+          WEATHER_API_URL: !Ref WeatherAPIURL
+          S3_BUCKET_NAME: !Ref S3BucketName
+          # Notifications Config
+          DISCORD_ERROR_WEBHOOK_URL: !Ref DiscordWebhookURL
+      Events:
+        ImageClimateDatasetEventConsumer:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt ImageClimateDatasetTriggerQueue.Arn
+            BatchSize: 1
+            MaximumBatchingWindowInSeconds: 0
+            Enabled: true
+      Tags:
+        env: !Ref Env
+        service: !Ref Service
+        stack: !Sub ${AWS::StackName}
+        application: !Ref Application
+        version: !Ref Version
+        resource: lambda
