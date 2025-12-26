@@ -2,23 +2,19 @@ package dependency
 
 import (
 	"context"
+	"os"
 	"sync"
 	"time"
 
-	"github.com/redis/go-redis/v9"
-
 	"github.com/GabiHert/maxsatt-forest-completion-trigger/internal/application/adapter"
 	"github.com/GabiHert/maxsatt-forest-completion-trigger/internal/application/service"
-	"github.com/GabiHert/maxsatt-forest-completion-trigger/internal/application/usecase"
-	config "github.com/GabiHert/maxsatt-forest-completion-trigger/internal/infra/db"
 	"github.com/GabiHert/maxsatt-forest-completion-trigger/internal/infra/properties"
 	integrationAdapter "github.com/GabiHert/maxsatt-forest-completion-trigger/internal/integration/adapter"
 	"github.com/GabiHert/maxsatt-forest-completion-trigger/internal/integration/entrypoint/lambda"
-	"github.com/GabiHert/maxsatt-forest-completion-trigger/internal/integration/entrypoint/validator"
-	"github.com/GabiHert/maxsatt-forest-completion-trigger/internal/integration/persistence"
+	"github.com/GabiHert/maxsatt-forest-completion-trigger/internal/integration/messaging"
 	"github.com/GabiHert/maxsatt-forest-completion-trigger/internal/integration/publisher"
-	"github.com/GabiHert/maxsatt-forest-completion-trigger/internal/integration/utils"
-	"github.com/GabiHert/maxsatt-forest-completion-trigger/internal/integration/webservice"
+	"github.com/GabiHert/maxsatt-forest-completion-trigger/internal/integration/secret"
+	"github.com/GabiHert/maxsatt-forest-completion-trigger/internal/integration/webservice/maxsattapi"
 	"github.com/GabiHert/maxsatt-forest-completion-trigger/pkg/aws"
 	"github.com/GabiHert/maxsatt-forest-completion-trigger/pkg/http"
 	"github.com/GabiHert/maxsatt-forest-completion-trigger/pkg/logger"
@@ -29,49 +25,37 @@ type injector struct {
 	loggerWrapper logger.Logger
 
 	// AWS Clients
-	S3             aws.S3
 	Sns            aws.Sns
-	DynamoDB       aws.DynamoDB
+	Sqs            aws.Sqs
 	SecretsManager aws.SecretsManager
 
-	// External clients
-	httpClient http.Client
-	Redis      redis.UniversalClient
-
 	// Helpers
-	redisHelper          redishelper.RedisHelper
-	s3Helper             aws.S3HelperAdapter
-	snsHelper            aws.SnsHelperAdapter
-	parquetProcessor     integrationAdapter.ParquetProcessor
-	secretsManagerHelper aws.SecretsManagerHelperAdapter
+	snsHelper             aws.SnsHelperAdapter
+	sqsHelper             aws.SqsHelperAdapter
+	redisHelper           redishelper.RedisHelper
+	secretsManagerHelper  aws.SecretsManagerHelperAdapter
+	secretsManagerAdapter integrationAdapter.SecretsManagerAdapter
 
-	// Web services
-	authWebService     integrationAdapter.AuthWebService
-	analysisWebService integrationAdapter.AnalysisWebService
-	weatherWebService  integrationAdapter.WeatherWebService
-	fileWebService     integrationAdapter.FileWebService
+	// External clients
+	httpClient       http.Client
+	maxsattAPIClient *maxsattapi.MaxsattAPIClient
 
 	// Publishers
-	eventPublisher integrationAdapter.EventPublisher
+	notificationPublisher integrationAdapter.NotificationPublisher
+
+	// Repositories
+	forestCompletionRepository integrationAdapter.ForestCompletionRepository
 
 	// Notifiers
 	notifier integrationAdapter.Notifier
 
-	// Use cases
-	processParquetInChunks  usecase.ProcessParquetInChunks
-	fetchFieldAnalysis      usecase.FetchFieldAnalysis
-	fetchWeatherData        usecase.FetchWeatherData
-	calculateWeatherMetrics usecase.CalculateWeatherMetrics
-	mergeDatasets           usecase.MergeDatasets
-	fetchDeltaFile          usecase.FetchDeltaFile
-	createFileRecord        usecase.CreateFileRecord
-	publishEvent            usecase.PublishEvent
+	// Failure handling
+	failureHandler integrationAdapter.FailureHandler
 
 	// Services
-	processClimateAnalysisService adapter.ProcessClimateAnalysisService
+	processCompletionsService adapter.ProcessCompletionsService
 
 	// Entrypoint
-	Validator    validator.Validate
 	ErrorHandler integrationAdapter.ErrorHandler
 	Handler      integrationAdapter.Handler
 }
@@ -90,36 +74,44 @@ func Injector() *injector {
 	return instance
 }
 
-func (i *injector) Wire(ctx context.Context) *injector {
-	props := properties.Properties()
+// ResetInjector resets the injector singleton - should only be used in tests
+func ResetInjector() {
+	instance = nil
+	injectorInit = sync.Once{}
+}
 
+func (i *injector) Wire(ctx context.Context) *injector {
 	if i.loggerWrapper == nil {
 		i.loggerWrapper = logger.LoggerWrapper()
 	}
 
-	if i.S3 == nil {
-		i.S3 = aws.S3Client(props.Aws.S3.Region)
+	// Initialize Secrets Manager first (needed for properties)
+	awsRegion := os.Getenv("AWS_REGION")
+	if awsRegion == "" {
+		awsRegion = os.Getenv("AWS_SNS_REGION")
 	}
 
-	if i.httpClient == nil {
-		i.httpClient = http.HttpClient(30*time.Second, i.loggerWrapper)
+	if i.SecretsManager == nil {
+		i.SecretsManager = aws.SecretsManagerClient(awsRegion)
 	}
 
-	if i.Redis == nil && props.Redis.Host != "" {
-		i.Redis = config.Redis()
-	}
-
+	// Use NoOp Redis Helper since we don't need caching for secrets in this service
 	if i.redisHelper == nil {
-		if i.Redis != nil {
-			i.redisHelper = redishelper.Redis(i.Redis, props.Services.WeatherCacheTable, i.loggerWrapper)
-		} else {
-			i.redisHelper = redishelper.NoOpRedisHelper()
-		}
+		i.redisHelper = redishelper.NoOpRedisHelper()
 	}
 
-	if i.s3Helper == nil {
-		i.s3Helper = aws.S3Helper(i.S3, i.loggerWrapper)
+	if i.secretsManagerHelper == nil {
+		i.secretsManagerHelper = aws.SecretsManagerHelper(i.SecretsManager, i.redisHelper, i.loggerWrapper)
 	}
+
+	if i.secretsManagerAdapter == nil {
+		i.secretsManagerAdapter = secret.NewSecretsManager(i.secretsManagerHelper)
+	}
+
+	// Initialize properties with secrets manager
+	properties.InitializeSecretsManager(i.secretsManagerAdapter)
+
+	props := properties.Properties()
 
 	if i.Sns == nil {
 		i.Sns = aws.SnsClient(props.Aws.Sns.Region)
@@ -129,105 +121,73 @@ func (i *injector) Wire(ctx context.Context) *injector {
 		i.snsHelper = aws.SnsHelper(i.Sns, i.loggerWrapper)
 	}
 
-	if i.mergeDatasets == nil {
-		i.mergeDatasets = usecase.NewMergeDatasetsUseCase()
+	if i.Sqs == nil {
+		i.Sqs = aws.SqsClient(props.Aws.Sqs.Region)
 	}
 
-	if i.parquetProcessor == nil {
-		i.parquetProcessor = utils.NewParquetProcessor(i.mergeDatasets)
+	if i.sqsHelper == nil {
+		i.sqsHelper = aws.SqsHelper(i.Sqs, i.loggerWrapper)
 	}
 
-	if i.SecretsManager == nil {
-		i.SecretsManager = aws.SecretsManagerClient(props.Aws.SecretsManager.Region)
+	if i.httpClient == nil {
+		i.httpClient = http.HttpClient(30*time.Second, i.loggerWrapper)
 	}
 
-	if i.secretsManagerHelper == nil {
-		i.secretsManagerHelper = aws.SecretsManagerHelper(i.SecretsManager, i.redisHelper, i.loggerWrapper)
-	}
-
-	properties.Properties().Init(ctx, i.secretsManagerHelper)
-
-	if i.authWebService == nil {
-		i.authWebService = webservice.NewAuthWebService(i.httpClient, i.redisHelper)
-	}
-
-	if i.analysisWebService == nil {
-		i.analysisWebService = webservice.NewAnalysisWebService(i.httpClient, i.authWebService)
-	}
-
-	if i.weatherWebService == nil {
-		i.weatherWebService = webservice.NewWeather(i.httpClient, i.redisHelper)
-	}
-
-	if i.fileWebService == nil {
-		i.fileWebService = webservice.NewFileWebService(i.httpClient, i.authWebService)
+	// Initialize MaxSatt API client
+	if i.maxsattAPIClient == nil {
+		apiProps := props.MaxsattAPI
+		i.maxsattAPIClient = maxsattapi.NewMaxsattAPIClient(
+			apiProps.BaseURL,
+			apiProps.AuthURL,
+			apiProps.ClientID,
+			apiProps.ClientSecret,
+			i.httpClient,
+			i.loggerWrapper,
+		)
+		logger.Info(ctx, "MaxSatt API client initialized", map[string]any{
+			"baseURL": apiProps.BaseURL,
+			"authURL": apiProps.AuthURL,
+		})
 	}
 
 	if i.notifier == nil {
-		i.notifier = webservice.NewDiscordNotifier(
+		i.notifier = messaging.NewDiscordNotifier(
 			i.httpClient,
 			props.Notifications.DiscordWebhookURL,
 		)
 	}
 
-	if i.eventPublisher == nil {
-		i.eventPublisher = publisher.NewForestEventPublisher(i.snsHelper)
-	}
-
-	if i.processParquetInChunks == nil {
-		i.processParquetInChunks = persistence.NewDeltaDataset(
-			i.S3,
-			i.s3Helper,
-			i.parquetProcessor,
+	if i.failureHandler == nil {
+		i.failureHandler = messaging.NewFailureHandler(
+			i.sqsHelper,
+			i.notifier,
+			props.Services.DLQUrl,
 		)
 	}
 
-	if i.fetchFieldAnalysis == nil {
-		i.fetchFieldAnalysis = i.analysisWebService
+	if i.notificationPublisher == nil {
+		i.notificationPublisher = publisher.NewNotificationPublisher(i.snsHelper)
 	}
 
-	if i.fetchWeatherData == nil {
-		i.fetchWeatherData = i.weatherWebService
+	// Use MaxSatt API for forest completion repository instead of database
+	if i.forestCompletionRepository == nil {
+		i.forestCompletionRepository = maxsattapi.NewProcessingWebService(i.maxsattAPIClient)
 	}
 
-	if i.calculateWeatherMetrics == nil {
-		i.calculateWeatherMetrics = usecase.NewCalculateWeatherMetricsUseCase()
-	}
-
-	if i.fetchDeltaFile == nil {
-		i.fetchDeltaFile = i.fileWebService
-	}
-
-	if i.createFileRecord == nil {
-		i.createFileRecord = i.fileWebService
-	}
-
-	if i.publishEvent == nil {
-		i.publishEvent = i.eventPublisher
-	}
-
-	if i.processClimateAnalysisService == nil {
-		i.processClimateAnalysisService = service.NewProcessClimateAnalysisService(
-			i.processParquetInChunks,
-			i.fetchFieldAnalysis,
-			i.fetchWeatherData,
-			i.calculateWeatherMetrics,
-			i.fetchDeltaFile,
-			i.createFileRecord,
-			i.publishEvent,
+	if i.processCompletionsService == nil {
+		i.processCompletionsService = service.NewProcessCompletionsService(
+			i.forestCompletionRepository,
+			i.notificationPublisher,
+			i.forestCompletionRepository,
 		)
-	}
-
-	if i.Validator == nil {
-		i.Validator = validator.CustomValidator()
 	}
 
 	if i.ErrorHandler == nil {
-		i.ErrorHandler = lambda.ErrorHandler(i.notifier)
+		i.ErrorHandler = lambda.ErrorHandler(i.notifier, i.failureHandler)
 	}
 
 	if i.Handler == nil {
-		i.Handler = lambda.Handler(i.ErrorHandler, i.processClimateAnalysisService, i.Validator)
+		i.Handler = lambda.Handler(i.ErrorHandler, i.processCompletionsService)
 	}
 
 	return i

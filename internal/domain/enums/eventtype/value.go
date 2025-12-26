@@ -7,10 +7,12 @@ import (
 )
 
 const (
-	ForestCreated enums.EventType = "forest_created"
-	StartAnalysis enums.EventType = "start_analysis"
-	ReadyAnalysis enums.EventType = "ready_analysis"
-	Unknown       enums.EventType = "unknown"
+	ForestCreated         enums.EventType = "forest_created"
+	StartAnalysis         enums.EventType = "start_analysis"
+	ReadyAnalysis         enums.EventType = "ready_analysis"
+	Notify                enums.EventType = "notify"
+	ForestCompletionCheck enums.EventType = "FOREST_COMPLETION_CHECK"
+	Unknown               enums.EventType = "unknown"
 )
 
 func GetEventType(s string) enums.EventType {
@@ -21,6 +23,10 @@ func GetEventType(s string) enums.EventType {
 		return StartAnalysis
 	case "ready_analysis":
 		return ReadyAnalysis
+	case "notify":
+		return Notify
+	case "forest_completion_check":
+		return ForestCompletionCheck
 	default:
 		return Unknown
 	}

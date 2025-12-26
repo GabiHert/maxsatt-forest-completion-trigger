@@ -8,35 +8,31 @@ import (
 
 	"github.com/GabiHert/maxsatt-forest-completion-trigger/internal/application/adapter"
 	integrationAdapter "github.com/GabiHert/maxsatt-forest-completion-trigger/internal/integration/adapter"
-	"github.com/GabiHert/maxsatt-forest-completion-trigger/internal/integration/entrypoint/dto"
-	"github.com/GabiHert/maxsatt-forest-completion-trigger/internal/integration/entrypoint/validator"
-	"github.com/GabiHert/maxsatt-forest-completion-trigger/pkg/aws"
 	"github.com/GabiHert/maxsatt-forest-completion-trigger/pkg/errs"
 	"github.com/GabiHert/maxsatt-forest-completion-trigger/pkg/logger"
 )
 
+const maxForestsPerInvocation = 100
+
 type handler struct {
-	errorHandler                  integrationAdapter.ErrorHandler
-	processClimateAnalysisService adapter.ProcessClimateAnalysisService
-	validator                     validator.Validate
+	errorHandler              integrationAdapter.ErrorHandler
+	processCompletionsService adapter.ProcessCompletionsService
 }
 
 func Handler(
 	errorHandler integrationAdapter.ErrorHandler,
-	processClimateAnalysisService adapter.ProcessClimateAnalysisService,
-	validate validator.Validate,
+	processCompletionsService adapter.ProcessCompletionsService,
 ) integrationAdapter.Handler {
 	return &handler{
-		errorHandler:                  errorHandler,
-		processClimateAnalysisService: processClimateAnalysisService,
-		validator:                     validate,
+		errorHandler:              errorHandler,
+		processCompletionsService: processCompletionsService,
 	}
 }
 
 func (h *handler) Handle(lambdaCtx context.Context, event any) (responseData any, err error) {
 	ctx := logger.GetContext(lambdaCtx)
 	startTime := time.Now()
-	logger.Info(ctx, "Started", event)
+	logger.Info(ctx, "Started forest completion trigger", event)
 
 	defer func(ctx context.Context, event any) {
 		if recovered := recover(); recovered != nil {
@@ -47,43 +43,21 @@ func (h *handler) Handle(lambdaCtx context.Context, event any) (responseData any
 		}
 	}(ctx, event)
 
-	var climateEvent dto.ClimateEvent
-	_, retryCount, err := aws.SqsEventParser(event, &climateEvent)
+	result, err := h.processCompletionsService.Execute(ctx, maxForestsPerInvocation)
 	if err != nil {
 		return nil, err
 	}
 
-	ctx.SetReceiveCount(retryCount)
-	ctx.SetCorrelationId(climateEvent.ProcessingID)
-
-	if err = h.validator.Struct("CLIMATE-01-0001", &climateEvent); err != nil {
-		logger.Error(ctx, err, "Event validation failed")
-		return nil, err
+	response := map[string]any{
+		"processed_count":   result.ProcessedCount,
+		"failed_count":      result.FailedCount,
+		"execution_time_ms": time.Since(startTime).Milliseconds(),
 	}
 
-	result, err := h.processClimateAnalysisService.Execute(ctx, climateEvent.ProcessingID)
-	if err != nil {
-		return nil, err
-	}
-
-	if result.Skipped != nil && *result.Skipped {
-		response := dto.ClimateResponse{
-			Skipped: result.Skipped,
-			Reason:  result.Reason,
-		}
-		logger.Info(ctx, "Finished - Processing skipped", response)
-		return response, nil
-	}
-
-	response := dto.ClimateResponse{
-		S3Key: result.S3Key,
-		Metadata: &dto.ResponseMetadata{
-			ExecutionTimeMs:  time.Since(startTime).Milliseconds(),
-			WeatherAPITimeMs: result.Metadata.WeatherAPITimeMs,
-			MergingTimeMs:    result.Metadata.MergingTimeMs,
-			CacheHit:         result.Metadata.CacheHit,
-			Message:          "Climate analysis completed successfully",
-		},
+	if result.ProcessedCount == 0 && result.FailedCount == 0 {
+		response["message"] = "No forests ready for notification"
+	} else {
+		response["message"] = fmt.Sprintf("Processed %d forests, %d failed", result.ProcessedCount, result.FailedCount)
 	}
 
 	logger.Info(ctx, "Finished", response)

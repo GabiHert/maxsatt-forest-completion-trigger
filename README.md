@@ -98,6 +98,87 @@ internal/
 | `DISCORD_WEBHOOK_URL` | Discord webhook for error notifications |
 | `SERVICE_NAME` | Service identifier |
 
+## Scheduler Registration
+
+This service receives events from the MaxSatt Scheduler Trigger via SNS/SQS. The scheduler uses DynamoDB TTL expiration to trigger events at 15-minute intervals.
+
+### How It Works
+
+1. A DynamoDB item with TTL is inserted into `maxsatt.scheduler-config` table
+2. When TTL expires, DynamoDB deletes the item and triggers a stream event
+3. The scheduler-trigger Lambda receives the stream event
+4. Scheduler-trigger publishes to SNS topic `maxsatt-scheduler-trigger`
+5. Forest-completion-trigger receives the message via its SQS subscription
+6. After processing, scheduler-trigger creates a new DynamoDB item with the next TTL
+
+### Initial Setup
+
+To register the forest-completion-trigger with the scheduler, run:
+
+```bash
+# For development environment
+./scripts/register-scheduler.sh dev
+
+# For production environment
+./scripts/register-scheduler.sh prd
+```
+
+### Prerequisites for Registration
+
+- AWS CLI configured with credentials that have DynamoDB write access
+- `jq` installed for JSON processing
+- Access to the `maxsatt.scheduler-config` DynamoDB table
+
+### Seed Data
+
+The scheduler configuration is defined in `scripts/seed-scheduler-event.json`:
+
+| Field | Value | Description |
+|-------|-------|-------------|
+| `event_id` | `forest-completion-check-001` | Unique identifier for this schedule |
+| `service` | `MAXSATT_FOREST_COMPLETION_TRIGGER` | Service identifier |
+| `event_type` | `FOREST_COMPLETION_CHECK` | Event type sent to the service |
+| `schedule.execution_hours` | 96 time slots | Every 15 minutes (00:00, 00:15, ..., 23:45) |
+| `schedule.interval_days` | 0 | Run every day |
+| `schedule.ignore_week_days` | [] | No days skipped |
+| `schedule.limit` | null | No end date (runs indefinitely) |
+
+### Verifying Registration
+
+After running the registration script, you can verify the schedule was created:
+
+```bash
+# Query DynamoDB for the schedule
+aws dynamodb query \
+  --table-name maxsatt.scheduler-config \
+  --index-name event_id-index \
+  --key-condition-expression "event_id = :eid" \
+  --expression-attribute-values '{":eid": {"S": "forest-completion-check-001"}}' \
+  --region us-east-1
+```
+
+### Canceling the Schedule
+
+To cancel the schedule, you can either:
+
+1. Delete the DynamoDB item directly
+2. Set the `cancelled` field to `true`
+
+```bash
+# Find and delete the schedule
+aws dynamodb query \
+  --table-name maxsatt.scheduler-config \
+  --index-name event_id-index \
+  --key-condition-expression "event_id = :eid" \
+  --expression-attribute-values '{":eid": {"S": "forest-completion-check-001"}}' \
+  --region us-east-1 \
+  --query 'Items[0].id.S' \
+  --output text | xargs -I {} aws dynamodb delete-item \
+    --table-name maxsatt.scheduler-config \
+    --key '{"id": {"S": "{}"}}' \
+    --region us-east-1
+```
+
 ## Testing
 
 - **BDD-First**: All features start with `.feature` files

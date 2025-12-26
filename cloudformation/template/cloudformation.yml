@@ -1,6 +1,6 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
-Description: MaxSatt Image Climate Dataset Trigger - Processes image climate dataset requests and triggers analysis pipeline
+Description: MaxSatt Forest Completion Trigger - Detects forests where all processings are completed and publishes NOTIFY events for downstream notification
 
 Parameters:
   # ==================================================================================================
@@ -24,12 +24,12 @@ Parameters:
 
   Service:
     Type: String
-    Default: maxsatt-image-climate-dataset-trigger
+    Default: maxsatt-forest-completion-trigger
     Description: Service name
 
   Application:
     Type: String
-    Default: maxsatt-image-climate-dataset-trigger
+    Default: maxsatt-forest-completion-trigger
     Description: Application name
 
   # ==================================================================================================
@@ -64,23 +64,18 @@ Parameters:
 
   VisibilityTimeout:
     Type: Number
-    Default: 300
+    Default: 180
     Description: Visibility timeout for the queue (should be >= Lambda timeout)
 
-  ImageClimateDatasetTriggerQueueDLQName:
+  ForestCompletionTriggerQueueDLQName:
     Type: String
-    Default: maxsatt-image-climate-dataset-trigger-queue-dlq
-    Description: Name of the DLQ for image climate dataset trigger messages
+    Default: maxsatt-forest-completion-trigger-queue-dlq
+    Description: Name of the DLQ for forest completion trigger messages
 
-  ImageClimateDatasetTriggerQueueName:
+  ForestCompletionTriggerQueueName:
     Type: String
-    Default: maxsatt-image-climate-dataset-trigger-queue
-    Description: Name of the main queue for image climate dataset trigger messages
-
-  ForestSchedulerQueueName:
-    Type: String
-    Default: maxsatt-forest-scheduler-queue
-    Description: Name of the main queue for forest schedule messages
+    Default: maxsatt-forest-completion-trigger-queue
+    Description: Name of the main queue for forest completion trigger messages
 
   MaxReceiveCount:
     Type: Number
@@ -90,10 +85,15 @@ Parameters:
   # ==================================================================================================
   #   SNS Config
   # ==================================================================================================
+  SchedulerTriggerTopicName:
+    Type: String
+    Default: maxsatt-scheduler-trigger
+    Description: Name of the SNS topic from scheduler-trigger (subscribes to receive scheduled events)
+
   ForestEventsTopicName:
     Type: String
     Default: forest-events-topic
-    Description: Name of the SNS topic for forest events (sends FOREST_ANALYSIS events)
+    Description: Name of the SNS topic for forest events (publishes FOREST_ANALYSIS events)
 
   # ==================================================================================================
   #   Lambda Config
@@ -104,19 +104,19 @@ Parameters:
 
   FunctionName:
     Type: String
-    Default: maxsatt-image-climate-dataset-trigger
+    Default: maxsatt-forest-completion-trigger
     Description: Lambda function name
 
   MemorySize:
     Type: Number
-    Default: 128
+    Default: 256
     MinValue: 128
     MaxValue: 10240
     Description: Lambda function memory size in MB
 
   Timeout:
     Type: Number
-    Default: 300
+    Default: 120
     MinValue: 1
     MaxValue: 900
     Description: Lambda function timeout in seconds
@@ -141,7 +141,7 @@ Parameters:
 
   APISecretArn:
     Type: String
-    Description: ARN of the AWS Secrets Manager secret containing API credentials (JSON with AUTH_CLIENT_ID and AUTH_CLIENT_SECRET)
+    Description: ARN of the AWS Secrets Manager secret containing API credentials (JSON with client_id and client_secret)
 
   AuthURL:
     Type: String
@@ -156,17 +156,6 @@ Parameters:
     Type: String
     Description: Base URL for Forest Field API (MaxSatt API)
 
-  WeatherAPIURL:
-    Type: String
-    Description: Base URL for Weather API (Open-Meteo)
-
-  # ==================================================================================================
-  #   S3 Config
-  # ==================================================================================================
-  S3BucketName:
-    Type: String
-    Description: S3 bucket name for climate data processing
-
   # ==================================================================================================
   #   Notifications Config
   # ==================================================================================================
@@ -179,7 +168,7 @@ Resources:
   # ==================================================================================================
   #   IAM Roles
   # ==================================================================================================
-  ImageClimateDatasetTriggerLambdaRole:
+  ForestCompletionTriggerLambdaRole:
     Type: AWS::IAM::Role
     Properties:
       RoleName: !Sub ${Service}-${Env}-role
@@ -208,11 +197,11 @@ Resources:
   # ==================================================================================================
   #   IAM Policies
   # ==================================================================================================
-  ImageClimateDatasetTriggerLambdaLogsPolicy:
+  ForestCompletionTriggerLambdaLogsPolicy:
     Type: AWS::IAM::Policy
     DependsOn:
-      - ImageClimateDatasetTriggerLambdaRole
-      - ImageClimateDatasetTriggerLambdaLogGroup
+      - ForestCompletionTriggerLambdaRole
+      - ForestCompletionTriggerLambdaLogGroup
     Properties:
       PolicyName: !Sub ${Service}-${Env}-logs-policy
       PolicyDocument:
@@ -222,15 +211,15 @@ Resources:
             Action:
               - logs:CreateLogStream
               - logs:PutLogEvents
-            Resource: !GetAtt ImageClimateDatasetTriggerLambdaLogGroup.Arn
+            Resource: !GetAtt ForestCompletionTriggerLambdaLogGroup.Arn
       Roles:
-        - !Ref ImageClimateDatasetTriggerLambdaRole
+        - !Ref ForestCompletionTriggerLambdaRole
 
-  ImageClimateDatasetTriggerReceiveSqsMessagePolicy:
+  ForestCompletionTriggerReceiveSqsMessagePolicy:
     Type: AWS::IAM::Policy
     DependsOn:
-      - ImageClimateDatasetTriggerLambdaRole
-      - ImageClimateDatasetTriggerQueue
+      - ForestCompletionTriggerLambdaRole
+      - ForestCompletionTriggerQueue
     Properties:
       PolicyName: !Sub ${Service}-${Env}-receive-sqs-policy
       PolicyDocument:
@@ -242,16 +231,17 @@ Resources:
               - sqs:DeleteMessage
               - sqs:GetQueueAttributes
             Resource:
-              - !GetAtt ImageClimateDatasetTriggerQueue.Arn
+              - !GetAtt ForestCompletionTriggerQueue.Arn
       Roles:
-        - !Ref ImageClimateDatasetTriggerLambdaRole
+        - !Ref ForestCompletionTriggerLambdaRole
 
-  ImageClimateDatasetTriggerSendSqsMessagePolicy:
+  ForestCompletionTriggerSendToDLQPolicy:
     Type: AWS::IAM::Policy
     DependsOn:
-      - ImageClimateDatasetTriggerLambdaRole
+      - ForestCompletionTriggerLambdaRole
+      - ForestCompletionTriggerQueueDlq
     Properties:
-      PolicyName: !Sub ${Service}-${Env}-send-sqs-policy
+      PolicyName: !Sub ${Service}-${Env}-send-dlq-policy
       PolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -261,14 +251,14 @@ Resources:
               - sqs:GetQueueUrl
               - sqs:GetQueueAttributes
             Resource:
-              - !Sub arn:aws:sqs:${AWS::Region}:${AWS::AccountId}:${ForestSchedulerQueueName}
+              - !GetAtt ForestCompletionTriggerQueueDlq.Arn
       Roles:
-        - !Ref ImageClimateDatasetTriggerLambdaRole
+        - !Ref ForestCompletionTriggerLambdaRole
 
-  ImageClimateDatasetTriggerPublishSnsPolicy:
+  ForestCompletionTriggerPublishSnsPolicy:
     Type: AWS::IAM::Policy
     DependsOn:
-      - ImageClimateDatasetTriggerLambdaRole
+      - ForestCompletionTriggerLambdaRole
     Properties:
       PolicyName: !Sub ${Service}-${Env}-publish-sns-policy
       PolicyDocument:
@@ -280,12 +270,12 @@ Resources:
             Resource:
               - !Sub arn:aws:sns:${AWS::Region}:${AWS::AccountId}:${ForestEventsTopicName}
       Roles:
-        - !Ref ImageClimateDatasetTriggerLambdaRole
+        - !Ref ForestCompletionTriggerLambdaRole
 
-  ImageClimateDatasetTriggerSecretsManagerPolicy:
+  ForestCompletionTriggerSecretsManagerPolicy:
     Type: AWS::IAM::Policy
     DependsOn:
-      - ImageClimateDatasetTriggerLambdaRole
+      - ForestCompletionTriggerLambdaRole
     Properties:
       PolicyName: !Sub ${Service}-${Env}-secrets-manager-policy
       PolicyDocument:
@@ -297,35 +287,12 @@ Resources:
             Resource:
               - !Ref APISecretArn
       Roles:
-        - !Ref ImageClimateDatasetTriggerLambdaRole
-
-  ImageClimateDatasetTriggerS3Policy:
-    Type: AWS::IAM::Policy
-    DependsOn:
-      - ImageClimateDatasetTriggerLambdaRole
-    Properties:
-      PolicyName: !Sub ${Service}-${Env}-s3-policy
-      PolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Effect: Allow
-            Action:
-              - s3:GetObject
-              - s3:PutObject
-            Resource:
-              - !Sub "arn:aws:s3:::${S3BucketName}/*"
-          - Effect: Allow
-            Action:
-              - s3:ListBucket
-            Resource:
-              - !Sub "arn:aws:s3:::${S3BucketName}"
-      Roles:
-        - !Ref ImageClimateDatasetTriggerLambdaRole
+        - !Ref ForestCompletionTriggerLambdaRole
 
   # ==================================================================================================
   #   CloudWatch Log Groups
   # ==================================================================================================
-  ImageClimateDatasetTriggerLambdaLogGroup:
+  ForestCompletionTriggerLambdaLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
       LogGroupName: !Sub /aws/lambda/${FunctionName}
@@ -343,12 +310,12 @@ Resources:
           Value: log_group
 
   # ==================================================================================================
-  #   SQS Queues - Input Queue (standalone queue for image climate dataset triggers)
+  #   SQS Queues - Input Queue (receives from scheduler-trigger SNS topic)
   # ==================================================================================================
-  ImageClimateDatasetTriggerQueueDlq:
+  ForestCompletionTriggerQueueDlq:
     Type: AWS::SQS::Queue
     Properties:
-      QueueName: !Ref ImageClimateDatasetTriggerQueueDLQName
+      QueueName: !Ref ForestCompletionTriggerQueueDLQName
       MessageRetentionPeriod: !Ref MessageRetentionPeriod
       Tags:
         - Key: env
@@ -362,18 +329,18 @@ Resources:
         - Key: resource
           Value: sqs_dlq
 
-  ImageClimateDatasetTriggerQueue:
+  ForestCompletionTriggerQueue:
     Type: AWS::SQS::Queue
     DependsOn:
-      - ImageClimateDatasetTriggerQueueDlq
+      - ForestCompletionTriggerQueueDlq
     Properties:
-      QueueName: !Ref ImageClimateDatasetTriggerQueueName
+      QueueName: !Ref ForestCompletionTriggerQueueName
       DelaySeconds: !Ref DelaySeconds
       MessageRetentionPeriod: !Ref MessageRetentionPeriod
       ReceiveMessageWaitTimeSeconds: !Ref ReceiveMessageWaitTimeSeconds
       VisibilityTimeout: !Ref VisibilityTimeout
       RedrivePolicy:
-        deadLetterTargetArn: !GetAtt ImageClimateDatasetTriggerQueueDlq.Arn
+        deadLetterTargetArn: !GetAtt ForestCompletionTriggerQueueDlq.Arn
         maxReceiveCount: !Ref MaxReceiveCount
       Tags:
         - Key: env
@@ -388,25 +355,65 @@ Resources:
           Value: sqs_queue
 
   # ==================================================================================================
+  #   SQS Queue Policy - Allow SNS to send messages to this queue
+  # ==================================================================================================
+  ForestCompletionTriggerQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    DependsOn:
+      - ForestCompletionTriggerQueue
+    Properties:
+      Queues:
+        - !Ref ForestCompletionTriggerQueue
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowSNSToSendMessage
+            Effect: Allow
+            Principal:
+              Service: sns.amazonaws.com
+            Action:
+              - sqs:SendMessage
+            Resource: !GetAtt ForestCompletionTriggerQueue.Arn
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !Sub arn:aws:sns:${AWS::Region}:${AWS::AccountId}:${SchedulerTriggerTopicName}
+
+  # ==================================================================================================
+  #   SNS Subscription - Subscribe to scheduler-trigger topic
+  # ==================================================================================================
+  ForestCompletionTriggerSnsSubscription:
+    Type: AWS::SNS::Subscription
+    DependsOn:
+      - ForestCompletionTriggerQueue
+      - ForestCompletionTriggerQueuePolicy
+    Properties:
+      Protocol: sqs
+      TopicArn: !Sub arn:aws:sns:${AWS::Region}:${AWS::AccountId}:${SchedulerTriggerTopicName}
+      Endpoint: !GetAtt ForestCompletionTriggerQueue.Arn
+      RawMessageDelivery: true
+      FilterPolicy:
+        event_type:
+          - FOREST_COMPLETION_CHECK
+
+  # ==================================================================================================
   #   Lambda Function
   # ==================================================================================================
-  ImageClimateDatasetTriggerLambda:
+  ForestCompletionTriggerLambda:
     Type: AWS::Serverless::Function
     DependsOn:
-      - ImageClimateDatasetTriggerLambdaLogGroup
-      - ImageClimateDatasetTriggerLambdaRole
-      - ImageClimateDatasetTriggerLambdaLogsPolicy
-      - ImageClimateDatasetTriggerReceiveSqsMessagePolicy
-      - ImageClimateDatasetTriggerSendSqsMessagePolicy
-      - ImageClimateDatasetTriggerPublishSnsPolicy
-      - ImageClimateDatasetTriggerSecretsManagerPolicy
-      - ImageClimateDatasetTriggerS3Policy
-      - ImageClimateDatasetTriggerQueue
+      - ForestCompletionTriggerLambdaLogGroup
+      - ForestCompletionTriggerLambdaRole
+      - ForestCompletionTriggerLambdaLogsPolicy
+      - ForestCompletionTriggerReceiveSqsMessagePolicy
+      - ForestCompletionTriggerSendToDLQPolicy
+      - ForestCompletionTriggerPublishSnsPolicy
+      - ForestCompletionTriggerSecretsManagerPolicy
+      - ForestCompletionTriggerQueue
     Properties:
       FunctionName: !Ref FunctionName
       MemorySize: !Ref MemorySize
       Timeout: !Ref Timeout
-      Role: !GetAtt ImageClimateDatasetTriggerLambdaRole.Arn
+      Role: !GetAtt ForestCompletionTriggerLambdaRole.Arn
       PackageType: Image
       ImageUri: !Ref ImageUri
       Architectures:
@@ -420,21 +427,18 @@ Resources:
           AWS_SQS_REGION: !Sub ${AWS::Region}
           AWS_SECRETS_MANAGER_REGION: !Sub ${AWS::Region}
           FOREST_EVENTS_TOPIC_ARN: !Sub arn:aws:sns:${AWS::Region}:${AWS::AccountId}:${ForestEventsTopicName}
-          FOREST_SCHEDULE_QUEUE_URL: !Sub https://sqs.${AWS::Region}.amazonaws.com/${AWS::AccountId}/${ForestSchedulerQueueName}
           FOREST_SCHEDULE_INTERVAL_DAYS: !Ref ForestScheduleIntervalDays
           API_SECRET: !Ref APISecretArn
           AUTH_URL: !Ref AuthURL
           AUTH_GTW_ID: !Ref AuthGtwId
           FOREST_FIELD_API_URL: !Ref ForestFieldAPIURL
-          WEATHER_API_URL: !Ref WeatherAPIURL
-          S3_BUCKET_NAME: !Ref S3BucketName
-          # Notifications Config
+          DLQ_URL: !Ref ForestCompletionTriggerQueueDlq
           DISCORD_ERROR_WEBHOOK_URL: !Ref DiscordWebhookURL
       Events:
-        ImageClimateDatasetEventConsumer:
+        ForestCompletionEventConsumer:
           Type: SQS
           Properties:
-            Queue: !GetAtt ImageClimateDatasetTriggerQueue.Arn
+            Queue: !GetAtt ForestCompletionTriggerQueue.Arn
             BatchSize: 1
             MaximumBatchingWindowInSeconds: 0
             Enabled: true
@@ -445,3 +449,31 @@ Resources:
         application: !Ref Application
         version: !Ref Version
         resource: lambda
+
+Outputs:
+  # ==================================================================================================
+  #   Outputs
+  # ==================================================================================================
+  LambdaFunctionArn:
+    Description: ARN of the Forest Completion Trigger Lambda function
+    Value: !GetAtt ForestCompletionTriggerLambda.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-LambdaArn
+
+  QueueArn:
+    Description: ARN of the Forest Completion Trigger SQS queue
+    Value: !GetAtt ForestCompletionTriggerQueue.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-QueueArn
+
+  QueueUrl:
+    Description: URL of the Forest Completion Trigger SQS queue
+    Value: !Ref ForestCompletionTriggerQueue
+    Export:
+      Name: !Sub ${AWS::StackName}-QueueUrl
+
+  DLQArn:
+    Description: ARN of the Forest Completion Trigger DLQ
+    Value: !GetAtt ForestCompletionTriggerQueueDlq.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-DLQArn

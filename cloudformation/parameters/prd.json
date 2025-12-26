@@ -16,14 +16,6 @@
     "ParameterValue": "https://maxsatt.bhlabs.tech/maxsatt"
   },
   {
-    "ParameterKey": "WeatherAPIURL",
-    "ParameterValue": "https://archive-api.open-meteo.com"
-  },
-  {
-    "ParameterKey": "S3BucketName",
-    "ParameterValue": "maxsatt-processing-prd"
-  },
-  {
     "ParameterKey": "DiscordWebhookURL",
     "ParameterValue": ""
   }

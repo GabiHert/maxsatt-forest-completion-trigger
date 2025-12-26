@@ -2,20 +2,21 @@ package properties
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"strconv"
 	"sync"
 
-	aws2 "github.com/GabiHert/maxsatt-forest-completion-trigger/pkg/aws"
+	"github.com/GabiHert/maxsatt-forest-completion-trigger/internal/integration/adapter"
+	"github.com/GabiHert/maxsatt-forest-completion-trigger/pkg/logger"
 )
 
 type properties struct {
 	Application   *application
-	Database      *database
-	Redis         *redis
 	Aws           *aws
 	Services      *services
 	Notifications *notifications
+	MaxsattAPI    *maxsattAPI
 }
 
 type notifications struct {
@@ -23,57 +24,14 @@ type notifications struct {
 }
 
 type application struct {
-	Secrets        map[string]string
-	ServerPort     string
-	ServiceName    string
-	Secret         string
-	HealthCheckLog bool
-	Profiler       bool
-	Prometheus     bool
-	Swagger        bool
-	IsLambda       bool
-}
-
-type database struct {
-	Secret   string
-	Host     string
-	User     string
-	Password string
-	Name     string
-	Port     string
-	SslMode  string
-	LogLevel string
-	Schema   string
-}
-
-type redis struct {
-	Host         string
-	Port         string
-	Username     string
-	Password     string
-	GlobalPrefix string
+	ServiceName string
+	IsLambda    bool
 }
 
 type aws struct {
-	Config         *awsConfig
-	SecretsManager *secretsManager
-	DynamoDb       *dynamodb
-	Sns            *sns
-	Sqs            *sqs
-	S3             *s3
-	Batch          *batch
-}
-
-type awsConfig struct {
-	URL string
-}
-
-type secretsManager struct {
 	Region string
-}
-
-type dynamodb struct {
-	Region string
+	Sns    *sns
+	Sqs    *sqs
 }
 
 type sns struct {
@@ -84,121 +42,95 @@ type sqs struct {
 	Region string
 }
 
-type s3 struct {
-	Region string
-}
-
-type batch struct {
-	Region string
-}
-
 type services struct {
-	ForestEventsTopicArn       string
-	ForestScheduleTable        string
-	ForestScheduleQueueUrl     string
-	ClimateDataBucket          string
-	WeatherCacheTable          string
-	WeatherApiUrl              string
-	ForestFieldAPIURL          string
-	AuthClientId               string
-	AuthClientSecret           string
-	AuthUrl                    string
-	AuthGtwId                  string
-	ForestScheduleIntervalDays int
-	WeatherCacheTTLHours       int
-	APITimeoutSeconds          int
-	HistoricalClimateDays      int
+	ForestEventsTopicArn string
+	DLQUrl               string
+}
+
+type maxsattAPI struct {
+	BaseURL        string
+	AuthURL        string
+	ClientID       string
+	ClientSecret   string
+	TimeoutSeconds int
+}
+
+// maxsattAPISecret represents the MaxSatt API service account credentials
+type maxsattAPISecret struct {
+	ClientID     string `json:"client_id"`
+	ClientSecret string `json:"client_secret"`
 }
 
 var (
 	initPropertiesOnce sync.Once
-	secretsInitialized map[string]string
+	instance           *properties
+	secretsManager     adapter.SecretsManagerAdapter
 )
 
-func (p *properties) Init(ctx context.Context, secretsManager aws2.SecretsManagerHelperAdapter) {
-	initPropertiesOnce.Do(
-		func() {
-			if secretsManager != nil {
-				err := secretsManager.GetSecret(ctx, p.Application.Secret, &secretsInitialized)
-				if err != nil {
-					panic("failed to get secret from secrets manager. err: " + err.Error())
-				}
-			}
-		},
-	)
+// InitializeSecretsManager sets the secrets manager to use for fetching credentials
+// This must be called before Properties() is first invoked
+func InitializeSecretsManager(sm adapter.SecretsManagerAdapter) {
+	secretsManager = sm
+}
+
+// ResetProperties resets the properties singleton - should only be used in tests
+// This allows tests to reinitialize properties with new environment variables
+func ResetProperties() {
+	instance = nil
+	initPropertiesOnce = sync.Once{}
 }
 
 func Properties() *properties {
+	initPropertiesOnce.Do(func() {
+		instance = loadProperties()
+	})
+	return instance
+}
+
+func loadProperties() *properties {
+	ctx := context.Background()
+
+	// Fetch MaxSatt API credentials from Secrets Manager or environment variables
+	maxsattCreds := fetchMaxsattAPICredentials(ctx, os.Getenv("MAXSATT_API_SECRET_ARN"))
+	if maxsattCreds.ClientID == "" {
+		maxsattCreds.ClientID = os.Getenv("MAXSATT_CLIENT_ID")
+	}
+	if maxsattCreds.ClientSecret == "" {
+		maxsattCreds.ClientSecret = os.Getenv("MAXSATT_CLIENT_SECRET")
+	}
+
+	awsRegion := os.Getenv("AWS_REGION")
+	if awsRegion == "" {
+		awsRegion = os.Getenv("AWS_SNS_REGION")
+	}
+
 	return &properties{
 		Application: &application{
-			ServerPort:     os.Getenv("SERVER_PORT"),
-			ServiceName:    os.Getenv("SERVICE_NAME"),
-			HealthCheckLog: os.Getenv("HEALTH_CHECK_LOG") == "true",
-			Profiler:       os.Getenv("PROFILER") == "true",
-			Prometheus:     os.Getenv("PROMETHEUS") == "true",
-			Swagger:        os.Getenv("SWAGGER") == "true",
-			IsLambda:       os.Getenv("LAMBDA_TASK_ROOT") != "",
-			Secret:         os.Getenv("API_SECRET"),
-		},
-		Database: &database{
-			Secret:   os.Getenv("DB_SECRET"),
-			Host:     os.Getenv("DB_HOST"),
-			User:     os.Getenv("DB_USERNAME"),
-			Password: os.Getenv("DB_PASSWORD"),
-			Name:     os.Getenv("DB_NAME"),
-			Port:     os.Getenv("DB_PORT"),
-			SslMode:  os.Getenv("DB_SSL_MODE"),
-			LogLevel: os.Getenv("DB_LOG_LEVEL"),
-		},
-		Redis: &redis{
-			Host:         os.Getenv("REDIS_HOST"),
-			Port:         os.Getenv("REDIS_PORT"),
-			Username:     os.Getenv("REDIS_USERNAME"),
-			Password:     os.Getenv("REDIS_PASSWORD"),
-			GlobalPrefix: os.Getenv("REDIS_GLOBAL_PREFIX"),
+			ServiceName: os.Getenv("SERVICE_NAME"),
+			IsLambda:    os.Getenv("LAMBDA_TASK_ROOT") != "",
 		},
 		Aws: &aws{
-			Config: &awsConfig{
-				URL: os.Getenv("AWS_URL"),
-			},
-			SecretsManager: &secretsManager{
-				Region: os.Getenv("AWS_SECRETS_MANAGER_REGION"),
-			},
-			DynamoDb: &dynamodb{
-				Region: os.Getenv("AWS_DYNAMODB_REGION"),
-			},
+			Region: awsRegion,
 			Sns: &sns{
 				Region: os.Getenv("AWS_SNS_REGION"),
 			},
 			Sqs: &sqs{
 				Region: os.Getenv("AWS_SQS_REGION"),
 			},
-			S3: &s3{
-				Region: os.Getenv("AWS_S3_REGION"),
-			},
-			Batch: &batch{
-				Region: os.Getenv("AWS_BATCH_REGION"),
-			},
 		},
 		Services: &services{
-			ForestEventsTopicArn:       os.Getenv("FOREST_EVENTS_TOPIC_ARN"),
-			ForestScheduleIntervalDays: parseInt(os.Getenv("FOREST_SCHEDULE_INTERVAL_DAYS"), 5),
-			ForestScheduleTable:        getEnvWithDefault("FOREST_SCHEDULE_TABLE", "forests-analysis-schedules"),
-			ForestScheduleQueueUrl:     os.Getenv("FOREST_SCHEDULE_QUEUE_URL"),
-			ClimateDataBucket:          getEnvWithDefault("S3_BUCKET_NAME", "maxsatt-climate-data"),
-			WeatherCacheTable:          getEnvWithDefault("CACHE_TABLE_NAME", "weather-cache"),
-			WeatherCacheTTLHours:       parseInt(os.Getenv("WEATHER_CACHE_TTL_HOURS"), 24),
-			WeatherApiUrl:              os.Getenv("WEATHER_API_URL"),
-			APITimeoutSeconds:          parseInt(os.Getenv("API_TIMEOUT_SECONDS"), 30),
-			ForestFieldAPIURL:          os.Getenv("FOREST_FIELD_API_URL"),
-			HistoricalClimateDays:      parseInt(os.Getenv("HISTORICAL_CLIMATE_DAYS"), 30),
-			AuthClientId:               secretsInitialized["client_id"],
-			AuthClientSecret:           secretsInitialized["client_secret"],
-			AuthUrl:                    os.Getenv("AUTH_URL"),
-			AuthGtwId:                  os.Getenv("AUTH_GTW_ID"),
+			ForestEventsTopicArn: os.Getenv("FOREST_EVENTS_TOPIC_ARN"),
+			DLQUrl:               os.Getenv("DLQ_URL"),
 		},
 		Notifications: &notifications{
 			DiscordWebhookURL: os.Getenv("DISCORD_ERROR_WEBHOOK_URL"),
+		},
+		MaxsattAPI: &maxsattAPI{
+			BaseURL:        getEnvOrDefault("MAXSATT_API_URL", ""),
+			AuthURL:        getAuthURL(),
+			ClientID:       maxsattCreds.ClientID,
+			ClientSecret:   maxsattCreds.ClientSecret,
+			TimeoutSeconds: parseInt(os.Getenv("MAXSATT_API_TIMEOUT_SECONDS"), 30),
 		},
 	}
 }
@@ -211,10 +143,52 @@ func parseInt(s string, defaultVal int) int {
 	return i
 }
 
-func getEnvWithDefault(key string, defaultVal string) string {
-	value := os.Getenv(key)
-	if value == "" {
-		return defaultVal
+func getEnvOrDefault(key, defaultVal string) string {
+	if val := os.Getenv(key); val != "" {
+		return val
 	}
-	return value
+	return defaultVal
+}
+
+// getAuthURL returns the auth URL from MAXSATT_AUTH_URL or falls back to AUTH_URL
+func getAuthURL() string {
+	if val := os.Getenv("MAXSATT_AUTH_URL"); val != "" {
+		return val
+	}
+	return os.Getenv("AUTH_URL")
+}
+
+// fetchMaxsattAPICredentials retrieves the MaxSatt API credentials from Secrets Manager
+func fetchMaxsattAPICredentials(ctx context.Context, secretArn string) maxsattAPISecret {
+	if secretArn == "" {
+		return maxsattAPISecret{}
+	}
+
+	if secretsManager == nil {
+		logger.Warn(ctx, nil, "Cannot fetch MaxSatt API credentials: secrets manager not initialized")
+		return maxsattAPISecret{}
+	}
+
+	logger.Info(ctx, "Fetching MaxSatt API credentials from Secrets Manager", map[string]any{
+		"secretArn": secretArn,
+	})
+
+	secretString, err := secretsManager.GetSecret(ctx, secretArn)
+	if err != nil {
+		logger.Error(ctx, err, "Failed to fetch MaxSatt API credentials from Secrets Manager", map[string]any{
+			"secretArn": secretArn,
+		})
+		return maxsattAPISecret{}
+	}
+
+	var apiSecret maxsattAPISecret
+	if err := json.Unmarshal([]byte(secretString), &apiSecret); err != nil {
+		logger.Error(ctx, err, "Failed to parse MaxSatt API secret JSON", map[string]any{
+			"secretArn": secretArn,
+		})
+		return maxsattAPISecret{}
+	}
+
+	logger.Info(ctx, "Successfully fetched MaxSatt API credentials from Secrets Manager")
+	return apiSecret
 }

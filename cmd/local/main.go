@@ -2,49 +2,22 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 
 	"github.com/GabiHert/maxsatt-forest-completion-trigger/internal/infra/dependency"
 
-	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-lambda-go/lambdacontext"
 	"github.com/google/uuid"
 )
 
 func main() {
-
-	// Sample climate analysis event
-	message := map[string]any{
-		"processing_id": "test-processing-123",
-	}
-
 	awsCtx := lambdacontext.NewContext(context.Background(), &lambdacontext.LambdaContext{
 		AwsRequestID: uuid.New().String(),
 	})
 
-	messageBodyBytes, err := json.Marshal(message)
-	if err != nil {
-		panic(err)
-	}
+	// Forest completion trigger is scheduler-based, so the event is empty
+	event := map[string]any{}
 
-	messageEvent := &events.SQSEvent{
-		Records: []events.SQSMessage{
-			{
-				MessageId:              "",
-				ReceiptHandle:          "",
-				Body:                   string(messageBodyBytes),
-				Md5OfBody:              "",
-				Md5OfMessageAttributes: "",
-				Attributes:             nil,
-				MessageAttributes:      nil,
-				EventSourceARN:         "",
-				EventSource:            "",
-				AWSRegion:              "",
-			},
-		},
-	}
-
-	response, err := dependency.Injector().Wire(awsCtx).Handler.Handle(awsCtx, messageEvent)
+	response, err := dependency.Injector().Wire(awsCtx).Handler.Handle(awsCtx, event)
 	if err != nil {
 		panic(err)
 	}

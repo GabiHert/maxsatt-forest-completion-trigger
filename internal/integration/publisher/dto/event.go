@@ -20,6 +20,7 @@ type Event struct {
 	SpecVersion        int       `json:"spec_version"`
 }
 
+// NewEvent creates a new Event with the default service name as source.
 func NewEvent(correlationId string, eventType enums.EventType, eventData any) Event {
 	return Event{
 		SpecVersion:        1,
@@ -27,6 +28,19 @@ func NewEvent(correlationId string, eventType enums.EventType, eventData any) Ev
 		EventCorrelationId: correlationId,
 		EventDate:          time.Now().UTC(),
 		Source:             properties.Properties().Application.ServiceName,
+		EventType:          eventType.String(),
+		EventData:          eventData,
+	}
+}
+
+// NewEventWithSource creates a new Event with a custom source.
+func NewEventWithSource(correlationId string, source string, eventType enums.EventType, eventData any) Event {
+	return Event{
+		SpecVersion:        1,
+		EventId:            uuid.NewString(),
+		EventCorrelationId: correlationId,
+		EventDate:          time.Now().UTC(),
+		Source:             source,
 		EventType:          eventType.String(),
 		EventData:          eventData,
 	}

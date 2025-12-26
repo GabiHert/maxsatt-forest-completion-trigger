@@ -10,7 +10,7 @@ import (
 )
 
 func Start() {
-	logger.Info(context.TODO(), "Starting climate analysis lambda")
+	logger.Info(context.TODO(), "Starting forest completion trigger lambda")
 
 	start := dependency.Injector().Wire(context.Background()).Handler.Handle
 	lambda.Start(func(ctx context.Context, event any) error {

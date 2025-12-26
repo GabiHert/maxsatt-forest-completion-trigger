@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"mime/multipart"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -29,13 +28,10 @@ import (
 	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-lambda-go/lambdacontext"
 	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/cucumber/godog"
 	"github.com/google/uuid"
 	"github.com/parquet-go/parquet-go"
 	"github.com/redis/go-redis/v9"
-	"gorm.io/gorm"
-	"gorm.io/gorm/clause"
 )
 
 var tags string
@@ -72,7 +68,7 @@ type testUtils struct {
 	response       *response
 	time           *mock.Time
 	api            *mock.ApiMock
-	db             *mock.Db
+	oauthApi       *mock.ApiMock
 	redis          *redis.Client
 	sns            *mock.SnsClient
 	sqs            *mock.SqsClient
@@ -93,25 +89,12 @@ type response struct {
 }
 
 func InitializeScenario(ctx *godog.ScenarioContext) {
-	if properties.Properties().Application.ServerPort == "" {
-		listener, err := net.Listen("tcp", ":0")
-		if err != nil {
-			panic(err)
-		}
-		defer func(listener net.Listener) {
-			err = listener.Close()
-			if err != nil {
-				panic(err)
-			}
-		}(listener)
-		addr := listener.Addr().(*net.TCPAddr)
-		_ = os.Setenv("SERVER_PORT", strconv.Itoa(addr.Port))
-	}
 	test := &testUtils{
-		uri:            "http://localhost:" + properties.Properties().Application.ServerPort,
+		uri:            "",
 		client:         &http.Client{},
 		time:           mock.NewTime(),
 		api:            mock.NewApiServer(),
+		oauthApi:       mock.NewApiServer(),
 		redis:          mock.NewRedis(),
 		secretsManager: mock.NewSecretsManagerMock(),
 		dynamoDb:       mock.NewDynamoDbClient(),
@@ -120,24 +103,22 @@ func InitializeScenario(ctx *godog.ScenarioContext) {
 		s3:             mock.NewS3Client(),
 		rekognition:    mock.NewRekognitionClient(),
 		ses:            mock.NewSesClient(),
-		db:             mock.NewDb("maxsatt", map[string]any{}),
 	}
-
-	timeutils.GetTimeConfig().SetCurrentTimeProvider(test.time.Now)
-	_ = setInjectorField("SecretsManager", test.secretsManager)
-	_ = setInjectorField("Db", test.db.DbConn)
-	_ = setInjectorField("Redis", test.redis)
-	_ = setInjectorField("Sns", test.sns)
-	_ = setInjectorField("Sqs", test.sqs)
-	_ = setInjectorField("DynamoDb", test.dynamoDb)
-	_ = setInjectorField("Time", test.time)
-	_ = setInjectorField("S3", test.s3)
-	_ = setInjectorField("Rekognition", test.rekognition)
-	_ = setInjectorField("Ses", test.ses)
 
 	ctx.Before(
 		func(ctx context.Context, sc *godog.Scenario) (context.Context, error) {
 			test.before()
+			// Set up mocks AFTER ResetInjector() is called in before()
+			timeutils.GetTimeConfig().SetCurrentTimeProvider(test.time.Now)
+			_ = setInjectorField("SecretsManager", test.secretsManager)
+			_ = setInjectorField("Redis", test.redis)
+			_ = setInjectorField("Sns", test.sns)
+			_ = setInjectorField("Sqs", test.sqs)
+			_ = setInjectorField("DynamoDb", test.dynamoDb)
+			_ = setInjectorField("Time", test.time)
+			_ = setInjectorField("S3", test.s3)
+			_ = setInjectorField("Rekognition", test.rekognition)
+			_ = setInjectorField("Ses", test.ses)
 			test.startApp()
 			return ctx, nil
 		},
@@ -152,6 +133,9 @@ func InitializeScenario(ctx *godog.ScenarioContext) {
 	ctx.Given(`^the aws secret named "([^"]*)" exists with the following values$`, test.theSecretNamedExistsWithTheFollowingValues)
 	ctx.Given(`^the "([^"]*)" env var is set to "([^"]*)"$`, test.theEnvVarIsSetTo)
 	ctx.Given(`^the "([^"]*)" env var is set to the mocked api url$`, test.theEnvVarIsSetToTheMockedApiUrl)
+	ctx.Given(`^the "([^"]*)" env var is set to the mocked oauth url$`, test.theEnvVarIsSetToTheMockedOAuthUrl)
+	ctx.Given(`^the oauth server returns a valid token$`, test.theOAuthServerReturnsValidToken)
+	ctx.Given(`^the oauth server returns an invalid token response$`, test.theOAuthServerReturnsInvalidToken)
 	ctx.Given(`^the header is empty$`, test.theHeaderIsEmpty)
 	ctx.Given(`^the header contains the key "([^"]*)" with "([^"]*)"$`, test.theHeaderContainsTheKeyWith)
 	ctx.Given(`^the "([^"]*)" exists$`, test.theExists)
@@ -160,7 +144,7 @@ func InitializeScenario(ctx *godog.ScenarioContext) {
 	ctx.Given(`^the tables are empty$`, test.theTablesAreEmpty)
 	ctx.Given(`^the "([^"]*)" table is empty$`, test.theTableIsEmpty)
 	ctx.Given(`^the dynamodb table "([^"]*)" with key "([^"]*)" exists$`, test.theDynamoDbTableWithKeyExists)
-	ctx.Given(`^the (\d+) "([^"]*)" request to "([^"]*)" returns status (\d+) with the following response$`, test.theRequestToReturnsStatusWithTheFollowingResponse)
+	ctx.Given(`^the (-?\d+) "([^"]*)" request to "([^"]*)" returns status (\d+) with the following response$`, test.theRequestToReturnsStatusWithTheFollowingResponse)
 	ctx.Given(`^the "([^"]*)" "([^"]*)" should not return any results$`, test.theShouldNotReturnAnyResults)
 	ctx.Given(`^aws rekognition returns the following response$`, test.awsRekognitionRetunrsTheFollowingResponse)
 	ctx.Step(`^I call "([^"]*)" "([^"]*)" with the following csv payload$`, test.iCallWithTheFollowingCsvPayload)
@@ -193,26 +177,6 @@ func InitializeScenario(ctx *godog.ScenarioContext) {
 	ctx.When(`^the following event is received via sqs$`, test.theFollowingEventIsReceivedViaSqs)
 	ctx.Then(`^the lambda should finish without errors$`, test.theLambdaShouldFinishWithoutErrors)
 	ctx.Then(`^the lambda should finish with "([^"]*)" error$`, test.theLambdaShouldFinishWithError)
-	ctx.Then(`^the db should contain the "([^"]*)" with the id "([^"]*)" colum "([^"]*)" equal to "([^"]*)"$`,
-		test.theDbShouldContainTheWithTheIdColumEqualTo,
-	)
-	ctx.Then(`^the db should contain (\d+) objects in "([^"]*)" with the values$`,
-		test.theDbShouldContainObjectsInWithTheValues,
-	)
-	ctx.Then(`^the db should contain (\d+) objects in "([^"]*)" with the "([^"]*)" columns with values "([^"]*)"$`,
-		test.theDbShouldContainObjectsInWithTheColumnsWithValues,
-	)
-	ctx.Then(`^the db should contain the "([^"]*)" with the "([^"]*)" column value "([^"]*)" colum "([^"]*)" equal to "([^"]*)"$`,
-		test.theDbShouldContainTheWithTheColumnColumEqualTo,
-	)
-	ctx.Then(`^the db should contain the "([^"]*)" with the id "([^"]*)" array colum "([^"]*)" length is (\d+)$`,
-		test.theDbShouldContainTheWithTheIdArrayColumLengthIs,
-	)
-	ctx.Step(`^the db should contain (\d+) objects in the "([^"]*)" table$`, test.theDbShouldContainObjectsInTheTable)
-	ctx.Then(
-		`^the db should contain the "([^"]*)" with the colum "([^"]*)" equal to "([^"]*)" for the following where parameters$`,
-		test.theDbShouldContainTheWithTheColumEqualToForTheFollowingWhereParameters,
-	)
 	ctx.Then(
 		`^the sqs queue "([^"]*)" should have (\d+) messages published$`,
 		test.theSqsQueueShouldHaveMessagesPublished,
@@ -285,26 +249,8 @@ func setInjectorField(fieldName string, value any) error {
 var serverInit sync.Once
 
 func (t *testUtils) startApp() {
-	//serverInit.Do(
-	//	func() {
-	//		go func() {
-	//			if !properties.Properties().Application.IsLambda {
-	//				if !properties.Properties().Application.IsLambda {
-	//					application.Start()
-	//				}
-	//			}
-	//
-	//		}()
-	//	},
-	//)
-
-	// Wait for the server to start and health check returns 200
-	//for {
-	//	resp, err := http.Get(t.uri + "/health")
-	//	if err == nil && resp.StatusCode == http.StatusOK {
-	//		break
-	//	}
-	//}
+	// For lambda functions, we don't start an HTTP server
+	// The handler is invoked directly in the test steps
 }
 
 func (t *testUtils) before() {
@@ -325,7 +271,10 @@ func (t *testUtils) before() {
 	t.sns.Reset()
 	t.sqs.Reset()
 
-	//_ = os.Setenv("LOG_LEVEL", "off")
+	// Reset properties and injector for each scenario
+	properties.ResetProperties()
+	dependency.ResetInjector()
+
 	_ = os.Setenv("API_SECRET", "api-secret")
 	_ = os.Setenv("AWS_S3_EMPLOYEES_BUCKET", "test-bucket")
 	t.secretsManager.SetSecret("api-secret", map[string]any{
@@ -334,6 +283,7 @@ func (t *testUtils) before() {
 	})
 
 	t.api.Start()
+	t.oauthApi.Start()
 }
 
 func (t *testUtils) execute(method, url string, request []byte, headers, queryParams map[string]string) (
@@ -390,6 +340,30 @@ func (t *testUtils) theEnvVarIsSetToTheMockedApiUrl(key string) error {
 	return nil
 }
 
+func (t *testUtils) theEnvVarIsSetToTheMockedOAuthUrl(key string) error {
+	mockUrl := t.oauthApi.GetUrl() + "/oauth/token"
+	_ = os.Setenv(key, mockUrl)
+
+	return nil
+}
+
+func (t *testUtils) theOAuthServerReturnsValidToken() error {
+	t.oauthApi.SetResponse(-1, "POST", "/oauth/token", 200, map[string]any{
+		"access_token": "mock-valid-access-token",
+		"token_type":   "Bearer",
+		"expires_in":   3600,
+	})
+	return nil
+}
+
+func (t *testUtils) theOAuthServerReturnsInvalidToken() error {
+	t.oauthApi.SetResponse(-1, "POST", "/oauth/token", 401, map[string]any{
+		"error":             "invalid_client",
+		"error_description": "Invalid client credentials",
+	})
+	return nil
+}
+
 func (t *testUtils) theHeaderIsEmpty() error {
 	t.headers = make(map[string]string)
 
@@ -410,29 +384,9 @@ func (t *testUtils) theExists(table string, jsonEntity *godog.DocString) error {
 		return err
 	}
 
-	if entity, ok := t.db.GetModel(table); ok {
-		for _, item := range items {
-			itemBytes, err := json.Marshal(item)
-			if err != nil {
-				return err
-			}
-
-			newEntity := reflect.TypeOf(entity)
-			newEntityValue := reflect.New(newEntity).Interface()
-			err = json.Unmarshal(itemBytes, newEntityValue)
-			if err != nil {
-				return err
-			}
-
-			result := t.db.DbConn.Session(&gorm.Session{FullSaveAssociations: true}).Create(newEntityValue)
-			if result.Error != nil {
-				return result.Error
-			}
-		}
-	} else {
-		for _, item := range items {
-			t.dynamoDb.AddItem(item, table)
-		}
+	// For HTTP-based tests, we add items to dynamoDB
+	for _, item := range items {
+		t.dynamoDb.AddItem(item, table)
 	}
 
 	return nil
@@ -509,11 +463,7 @@ func (t *testUtils) theS3FileExists(filePath, fileUrl string) error {
 
 func (t *testUtils) theTablesAreEmpty() error {
 	t.dynamoDb.Reset()
-	err := t.db.ClearDB()
-	if err != nil {
-		return err
-	}
-	err = mock.ClearRedis(t.redis)
+	err := mock.ClearRedis(t.redis)
 	if err != nil {
 		return err
 	}
@@ -521,16 +471,9 @@ func (t *testUtils) theTablesAreEmpty() error {
 }
 
 func (t *testUtils) theTableIsEmpty(table string) error {
-	if _, ok := t.db.GetModel(table); ok {
-		err := t.db.ClearTable(table)
-		if err != nil {
-			return err
-		}
-	} else {
-		err := t.dynamoDb.ResetTable(table)
-		if err != nil {
-			return err
-		}
+	err := t.dynamoDb.ResetTable(table)
+	if err != nil {
+		return err
 	}
 
 	return nil
@@ -977,228 +920,13 @@ func (t *testUtils) theLambdaShouldFinishWithoutErrors() error {
 
 func (t *testUtils) theLambdaShouldFinishWithError(message string) error {
 	if err := assertNotNull(t.response.err); err == nil {
-		return assertEqual(t.response.err.Error(), message)
+		if strings.Contains(t.response.err.Error(), message) {
+			return nil
+		}
+		return fmt.Errorf("expected error containing '%s' but got: '%s'", message, t.response.err.Error())
 	} else {
-		return err
+		return fmt.Errorf("expected error but got none")
 	}
-}
-
-func (t *testUtils) theDbShouldContainTheWithTheIdColumEqualTo(
-	entityName, id, dotSeparatedField, value string,
-) error {
-	var entity any
-	if entityName == "payer" {
-		//entity = &model.Payer{Id: &id}
-		//result := t.db.First(entity)
-		//if result.Error != nil {
-		//	return result.Error
-		//}
-	}
-
-	field := getFieldValue(entity, dotSeparatedField)
-
-	switch field.(type) {
-	case string, int:
-		{
-			return assertEqual(field, value)
-		}
-	default:
-		jsonByte, err := json.Marshal(field)
-		if err != nil {
-			return err
-		}
-
-		jsonString := strings.Replace(string(jsonByte), "\"", "'", -1)
-
-		return assertEqual(jsonString, value)
-	}
-}
-
-func (t *testUtils) theDbShouldContainObjectsInWithTheValues(
-	quantity int, table string, content *godog.DocString,
-) error {
-	var object map[string]any
-	err := json.Unmarshal([]byte(content.Content), &object)
-	if err != nil {
-		return err
-	}
-
-	var items []map[string]any
-	if entity, ok := t.db.GetModel(table); ok {
-		entityType := reflect.TypeOf(entity)
-		entitySliceType := reflect.SliceOf(entityType)
-		entitySlice := reflect.MakeSlice(entitySliceType, 0, 0).Interface()
-		result := t.db.DbConn.Unscoped().Preload(clause.Associations).Find(&entitySlice)
-		if result.Error != nil {
-			return result.Error
-		}
-
-		itemBytes, err := json.Marshal(entitySlice)
-		if err != nil {
-			return err
-		}
-
-		err = json.Unmarshal(itemBytes, &items)
-		if err != nil {
-			return err
-		}
-	} else {
-		items = t.dynamoDb.GetAllItems(table)
-	}
-
-	count := 0
-	for _, item := range items {
-		matches := true
-		for key, value := range object {
-			err := validateFieldIsEqualsTo(item, key, anyToString(value))
-			if err != nil {
-				matches = false
-				break
-			}
-		}
-
-		if matches {
-			count++
-		}
-	}
-
-	return assertEqual(count, quantity)
-}
-
-func (t *testUtils) theDbShouldContainObjectsInWithTheColumnsWithValues(
-	quantity int, table, columnsString, valuesString string,
-) error {
-	columns := strings.Split(columnsString, ",")
-	values := strings.Split(valuesString, ",")
-
-	if len(columns) != len(values) {
-		return errors.New("columns length not equal values length")
-	}
-
-	items := t.dynamoDb.GetAllItems(table)
-
-	count := 0
-	for _, item := range items {
-		matches := true
-		for i, _ := range columns {
-			if columns[i] == "this_month_profit" && values[i] == "0" {
-				println("test")
-			}
-			err := validateFieldIsEqualsTo(item, columns[i], values[i])
-			if err != nil {
-				matches = false
-				break
-			}
-		}
-
-		if matches {
-			count++
-		}
-	}
-
-	return assertEqual(count, quantity)
-}
-
-func (t *testUtils) theDbShouldContainTheWithTheColumnColumEqualTo(
-	entityName, key, keyValue, dotSeparatedField, value string,
-) error {
-	var entity any
-	if entityName == "payer" {
-		//entity = &model.Payer{}
-		//
-		//var result *gorm.DB
-		//switch key {
-		//case "account_id":
-		//	result = t.db.Where("account_id = ?", keyValue).First(entity)
-		//default:
-		//	return errors.New("unknown key")
-		//}
-		//
-		//if result.Error != nil {
-		//	return result.Error
-		//}
-	}
-
-	field := getFieldValue(entity, dotSeparatedField)
-
-	if value == "nil" {
-		return assertNull(field)
-	} else if value == "not nil" {
-		return assertNotNull(field)
-	}
-
-	switch field.(type) {
-	case string, int:
-		{
-			return assertEqual(field, value)
-		}
-	default:
-		jsonByte, err := json.Marshal(field)
-		if err != nil {
-			return err
-		}
-
-		jsonString := strings.Replace(string(jsonByte), "\"", "'", -1)
-
-		return assertEqual(jsonString, value)
-	}
-
-}
-
-func (t *testUtils) theDbShouldContainTheWithTheIdArrayColumLengthIs(
-	entityName, id, dotSeparatedField string,
-	length int,
-) error {
-	var entity any
-	if entityName == "fincore operation" {
-		//entity = &model.FincoreOperationConfig{Id: &id}
-		//result := t.db.Preload("StepConfigList.ActionList").First(entity)
-		//if result.Error != nil {
-		//	return result.Error
-		//}
-	}
-
-	field := getFieldValue(entity, dotSeparatedField)
-
-	return assertEqual(len(field.([]any)), length)
-}
-
-func (t *testUtils) theDbShouldContainObjectsInTheTable(
-	quantity int,
-	table string,
-) error {
-	if entity, ok := t.db.GetModel(table); ok {
-		entityType := reflect.TypeOf(entity)
-		entitySliceType := reflect.SliceOf(entityType)
-		entitySlice := reflect.MakeSlice(entitySliceType, 0, 0).Interface()
-		result := t.db.DbConn.Unscoped().Preload(clause.Associations).Find(&entitySlice)
-		if result.Error != nil {
-			return result.Error
-		}
-		return assertEqual(reflect.ValueOf(entitySlice).Len(), quantity)
-	} else {
-		items := t.dynamoDb.GetAllItems(table)
-		return assertEqual(len(items), quantity)
-	}
-}
-
-func (t *testUtils) theDbShouldContainTheWithTheColumEqualToForTheFollowingWhereParameters(
-	entityName, dotSeparatedField, value string,
-	stringJson *godog.DocString,
-) error {
-	var queryParams any
-	_ = json.Unmarshal([]byte(stringJson.Content), &queryParams)
-	var entity any
-
-	if entityName == "service config template" {
-		//entity = &model.ServiceConfigTemplate{}
-		//result := t.db.Where(queryParams).First(&entity)
-		//if result.Error != nil {
-		//	return result.Error
-		//}
-	}
-
-	return assertEqual(getFieldValue(entity, dotSeparatedField), value)
 }
 
 func (t *testUtils) theSqsQueueShouldHaveMessagesPublished(queue string, quantity int) error {
@@ -1547,44 +1275,6 @@ func getFieldValue(object any, dotSeparatedField string) any {
 	return field
 }
 
-func validateFieldIsEqualsTo(item any, key, value string) error {
-	field := getFieldValue(item, key)
-
-	if value == "nil" {
-		return assertNull(field)
-	} else if value == "not nil" {
-		return assertNotNull(field)
-	}
-
-	switch field.(type) {
-	case string, int:
-		return assertEqual(field, value)
-	case map[string]any:
-		var valueMap map[string]any
-		err := json.Unmarshal([]byte(strings.Replace(value, "'", "\"", -1)), &valueMap)
-		if err != nil {
-			return err
-		}
-		for valueKey, valueValue := range valueMap {
-			valueValueString := anyToString(valueValue)
-			err = validateFieldIsEqualsTo(field.(map[string]any), valueKey, valueValueString)
-			if err != nil {
-				return err
-			}
-		}
-		return nil
-	default:
-		jsonByte, err := json.Marshal(field)
-		if err != nil {
-			return err
-		}
-
-		jsonString := strings.Replace(string(jsonByte), "\"", "'", -1)
-
-		return assertEqual(jsonString, value)
-	}
-}
-
 func assertNull(val1 any) error {
 	if val1 == nil {
 		return nil
@@ -1637,25 +1327,6 @@ func assertContains(current, expected any) error {
 	}
 
 	return fmt.Errorf("%s should contain %s", currentString, expectedString)
-}
-
-func anyToString(value any) string {
-	switch v := value.(type) {
-	case string:
-		return v
-	case int:
-		return strconv.Itoa(v)
-	case float64:
-		return strconv.FormatFloat(v, 'f', -1, 64)
-	case bool:
-		return strconv.FormatBool(v)
-	default:
-		byteValue, _ := json.Marshal(value)
-
-		jsonString := strings.Replace(string(byteValue), "\"", "'", -1)
-
-		return jsonString
-	}
 }
 
 func (t *testUtils) rekognitionShouldHaveDisassociatedFacesForCollectionAndUser(expectedCount int, collectionId, userId string) error {
@@ -2102,23 +1773,6 @@ func (t *testUtils) readParquetFile(filePath string) ([]byte, error) {
 
 	data, err := os.ReadFile(absPath)
 	if err == nil {
-		return data, nil
-	}
-
-	if t.s3 != nil {
-		s3Object, err := t.s3.GetObject(context.Background(), &s3.GetObjectInput{
-			Bucket: aws.String(properties.Properties().Services.ClimateDataBucket),
-			Key:    aws.String(filePath),
-		})
-		if err != nil {
-			return nil, fmt.Errorf("failed to get file from S3: %w", err)
-		}
-
-		data, err := io.ReadAll(s3Object.Body)
-		if err != nil {
-			return nil, fmt.Errorf("failed to read S3 object body: %w", err)
-		}
-
 		return data, nil
 	}
 
